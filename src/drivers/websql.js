@@ -20,8 +20,6 @@
                   require('promise') : this.Promise;
 
     var openDatabase = this.openDatabase;
-    var db = null;
-    var dbInfo = {};
 
     var SERIALIZED_MARKER = '__lfsc__:';
     var SERIALIZED_MARKER_LENGTH = SERIALIZED_MARKER.length;
@@ -38,7 +36,8 @@
     var TYPE_UINT32ARRAY = 'ui32';
     var TYPE_FLOAT32ARRAY = 'fl32';
     var TYPE_FLOAT64ARRAY = 'fl64';
-    var TYPE_SERIALIZED_MARKER_LENGTH = SERIALIZED_MARKER_LENGTH + TYPE_ARRAYBUFFER.length;
+    var TYPE_SERIALIZED_MARKER_LENGTH = SERIALIZED_MARKER_LENGTH +
+                                        TYPE_ARRAYBUFFER.length;
 
     // If WebSQL methods aren't available, we can stop now.
     if (!openDatabase) {
@@ -48,11 +47,15 @@
     // Open the WebSQL database (automatically creates one if one didn't
     // previously exist), using any options set in the config.
     function _initStorage(options) {
-        var _this = this;
+        var self = this;
+        var dbInfo = {
+            db: null
+        };
 
         if (options) {
             for (var i in options) {
-                dbInfo[i] = typeof(options[i]) !== 'string' ? options[i].toString() : options[i];
+                dbInfo[i] = typeof(options[i]) !== 'string' ?
+                            options[i].toString() : options[i];
             }
         }
 
@@ -60,16 +63,23 @@
             // Open the database; the openDatabase API will automatically
             // create it for us if it doesn't exist.
             try {
-                db = openDatabase(dbInfo.name, dbInfo.version,
-                                  dbInfo.description, dbInfo.size);
+                dbInfo.db = openDatabase(dbInfo.name, String(dbInfo.version),
+                                         dbInfo.description, dbInfo.size);
             } catch (e) {
-                return _this.setDriver('localStorageWrapper').then(resolve, reject);
+                return self.setDriver('localStorageWrapper')
+                    .then(function() {
+                        return self._initStorage(options);
+                    })
+                    .then(resolve)
+                    .catch(reject);
             }
 
             // Create our key/value table if it doesn't exist.
-            db.transaction(function(t) {
+            dbInfo.db.transaction(function(t) {
                 t.executeSql('CREATE TABLE IF NOT EXISTS ' + dbInfo.storeName +
-                             ' (id INTEGER PRIMARY KEY, key unique, value)', [], function() {
+                             ' (id INTEGER PRIMARY KEY, key unique, value)', [],
+                             function() {
+                    self._dbInfo = dbInfo;
                     resolve();
                 }, function(t, error) {
                     reject(error);
@@ -79,13 +89,24 @@
     }
 
     function getItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
                     t.executeSql('SELECT * FROM ' + dbInfo.storeName +
-                                 ' WHERE key = ? LIMIT 1', [key], function(t, results) {
-                        var result = results.rows.length ? results.rows.item(0).value : null;
+                                 ' WHERE key = ? LIMIT 1', [key],
+                                 function(t, results) {
+                        var result = results.rows.length ?
+                                     results.rows.item(0).value : null;
 
                         // Check to see if this is serialized content we need to
                         // unpack.
@@ -106,10 +127,63 @@
         return promise;
     }
 
-    function setItem(key, value, callback) {
-        var _this = this;
+    function iterate(iterator, callback) {
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+
+                dbInfo.db.transaction(function(t) {
+                    t.executeSql('SELECT * FROM ' + dbInfo.storeName, [],
+                        function(t, results) {
+                            var rows = results.rows;
+                            var length = rows.length;
+
+                            for (var i = 0; i < length; i++) {
+                                var item = rows.item(i);
+                                var result = item.value;
+
+                                // Check to see if this is serialized content
+                                // we need to unpack.
+                                if (result) {
+                                    result = _deserialize(result);
+                                }
+
+                                result = iterator(result, item.key);
+
+                                // void(0) prevents problems with redefinition
+                                // of `undefined`.
+                                if (result !== void(0)) {
+                                    resolve(result);
+                                    return;
+                                }
+                            }
+
+                            resolve();
+                        }, function(t, error) {
+                            reject(error);
+                        });
+                });
+            }).catch(reject);
+        });
+
+        executeCallback(promise, callback);
+        return promise;
+    }
+
+    function setItem(key, value, callback) {
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
+        var promise = new Promise(function(resolve, reject) {
+            self.ready().then(function() {
                 // The localStorage API doesn't return undefined values in an
                 // "expected" way, so undefined is always cast to null in all
                 // drivers. See: https://github.com/mozilla/localForage/pull/42
@@ -124,13 +198,14 @@
                     if (error) {
                         reject(error);
                     } else {
-                        db.transaction(function(t) {
-                            t.executeSql('INSERT OR REPLACE INTO ' + dbInfo.storeName +
-                                         ' (key, value) VALUES (?, ?)', [key, value], function() {
-
+                        var dbInfo = self._dbInfo;
+                        dbInfo.db.transaction(function(t) {
+                            t.executeSql('INSERT OR REPLACE INTO ' +
+                                         dbInfo.storeName +
+                                         ' (key, value) VALUES (?, ?)',
+                                         [key, value], function() {
                                 resolve(originalValue);
                             }, function(t, error) {
-
                                 reject(error);
                             });
                         }, function(sqlError) { // The transaction failed; check
@@ -156,10 +231,19 @@
     }
 
     function removeItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
                     t.executeSql('DELETE FROM ' + dbInfo.storeName +
                                  ' WHERE key = ?', [key], function() {
 
@@ -179,15 +263,16 @@
     // Deletes every item in the table.
     // TODO: Find out if this resets the AUTO_INCREMENT number.
     function clear(callback) {
-        var _this = this;
-        var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
-                    t.executeSql('DELETE FROM ' + dbInfo.storeName, [], function() {
+        var self = this;
 
+        var promise = new Promise(function(resolve, reject) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
+                    t.executeSql('DELETE FROM ' + dbInfo.storeName, [],
+                                 function() {
                         resolve();
                     }, function(t, error) {
-
                         reject(error);
                     });
                 });
@@ -201,10 +286,12 @@
     // Does a simple `COUNT(key)` to get the number of items stored in
     // localForage.
     function length(callback) {
-        var _this = this;
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
                     // Ahhh, SQL makes this one soooooo easy.
                     t.executeSql('SELECT COUNT(key) as c FROM ' +
                                  dbInfo.storeName, [], function(t, results) {
@@ -231,17 +318,19 @@
     // procedure for the `setItem()` SQL would solve this problem?
     // TODO: Don't change ID on `setItem()`.
     function key(n, callback) {
-        var _this = this;
-        var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
-                    t.executeSql('SELECT key FROM ' + dbInfo.storeName +
-                                 ' WHERE id = ? LIMIT 1', [n + 1], function(t, results) {
-                        var result = results.rows.length ? results.rows.item(0).key : null;
+        var self = this;
 
+        var promise = new Promise(function(resolve, reject) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
+                    t.executeSql('SELECT key FROM ' + dbInfo.storeName +
+                                 ' WHERE id = ? LIMIT 1', [n + 1],
+                                 function(t, results) {
+                        var result = results.rows.length ?
+                                     results.rows.item(0).key : null;
                         resolve(result);
                     }, function(t, error) {
-
                         reject(error);
                     });
                 });
@@ -253,16 +342,17 @@
     }
 
     function keys(callback) {
-        var _this = this;
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                db.transaction(function(t) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                dbInfo.db.transaction(function(t) {
                     t.executeSql('SELECT key FROM ' + dbInfo.storeName, [],
                                  function(t, results) {
-                        var length = results.rows.length;
                         var keys = [];
 
-                        for (var i = 0; i < length; i++) {
+                        for (var i = 0; i < results.rows.length; i++) {
                             keys.push(results.rows.item(i).key);
                         }
 
@@ -296,9 +386,9 @@
         }
 
         if ((bytes.length % 3) === 2) {
-            base64String = base64String.substring(0, base64String.length - 1) + "=";
+            base64String = base64String.substring(0, base64String.length - 1) + '=';
         } else if (bytes.length % 3 === 1) {
-            base64String = base64String.substring(0, base64String.length - 2) + "==";
+            base64String = base64String.substring(0, base64String.length - 2) + '==';
         }
 
         return base64String;
@@ -316,7 +406,8 @@
         // If we haven't marked this string as being specially serialized (i.e.
         // something other than serialized JSON), we can just return it and be
         // done with it.
-        if (value.substring(0, SERIALIZED_MARKER_LENGTH) !== SERIALIZED_MARKER) {
+        if (value.substring(0,
+                            SERIALIZED_MARKER_LENGTH) !== SERIALIZED_MARKER) {
             return JSON.parse(value);
         }
 
@@ -324,7 +415,8 @@
         // TypedArray. First we separate out the type of data we're dealing
         // with from the data itself.
         var serializedString = value.substring(TYPE_SERIALIZED_MARKER_LENGTH);
-        var type = value.substring(SERIALIZED_MARKER_LENGTH, TYPE_SERIALIZED_MARKER_LENGTH);
+        var type = value.substring(SERIALIZED_MARKER_LENGTH,
+                                   TYPE_SERIALIZED_MARKER_LENGTH);
 
         // Fill the string into a ArrayBuffer.
         var bufferLength = serializedString.length * 0.75;
@@ -333,9 +425,9 @@
         var p = 0;
         var encoded1, encoded2, encoded3, encoded4;
 
-        if (serializedString[serializedString.length - 1] === "=") {
+        if (serializedString[serializedString.length - 1] === '=') {
             bufferLength--;
-            if (serializedString[serializedString.length - 2] === "=") {
+            if (serializedString[serializedString.length - 2] === '=') {
                 bufferLength--;
             }
         }
@@ -399,7 +491,8 @@
         //
         // TODO: See why those tests fail and use a better solution.
         if (value && (value.toString() === '[object ArrayBuffer]' ||
-                      value.buffer && value.buffer.toString() === '[object ArrayBuffer]')) {
+                      value.buffer &&
+                      value.buffer.toString() === '[object ArrayBuffer]')) {
             // Convert binary arrays to a string and prefix the string with
             // a special marker.
             var buffer;
@@ -430,12 +523,12 @@
                 } else if (valueString === '[object Float64Array]') {
                     marker += TYPE_FLOAT64ARRAY;
                 } else {
-                    callback(new Error("Failed to get type for BinaryArray"));
+                    callback(new Error('Failed to get type for BinaryArray'));
                 }
             }
 
             callback(marker + _bufferToString(buffer));
-        } else if (valueString === "[object Blob]") {
+        } else if (valueString === '[object Blob]') {
             // Conver the blob to a binaryArray and then to a string.
             var fileReader = new FileReader();
 
@@ -450,9 +543,8 @@
             try {
                 callback(JSON.stringify(value));
             } catch (e) {
-                if (this.console && this.console.error) {
-                    this.console.error("Couldn't convert value into a JSON string: ", value);
-                }
+                window.console.error("Couldn't convert value into a JSON " +
+                                     'string: ', value);
 
                 callback(null, e);
             }
@@ -461,8 +553,10 @@
 
     function executeCallback(promise, callback) {
         if (callback) {
-            promise.then(callback, function(error) {
-                callback(null, error);
+            promise.then(function(result) {
+                callback(null, result);
+            }, function(error) {
+                callback(error);
             });
         }
     }
@@ -470,6 +564,7 @@
     var webSQLStorage = {
         _driver: 'webSQLStorage',
         _initStorage: _initStorage,
+        iterate: iterate,
         getItem: getItem,
         setItem: setItem,
         removeItem: removeItem,

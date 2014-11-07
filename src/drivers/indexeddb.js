@@ -9,9 +9,6 @@
     var Promise = (typeof module !== 'undefined' && module.exports) ?
                   require('promise') : this.Promise;
 
-    var db = null;
-    var dbInfo = {};
-
     // Initialize IndexedDB; fall back to vendor-prefixed versions if needed.
     var indexedDB = indexedDB || this.indexedDB || this.webkitIndexedDB ||
                     this.mozIndexedDB || this.OIndexedDB ||
@@ -25,6 +22,11 @@
     // Open the IndexedDB database (automatically creates one if one didn't
     // previously exist), using any options set in the config.
     function _initStorage(options) {
+        var self = this;
+        var dbInfo = {
+            db: null
+        };
+
         if (options) {
             for (var i in options) {
                 dbInfo[i] = options[i];
@@ -41,18 +43,28 @@
                 openreq.result.createObjectStore(dbInfo.storeName);
             };
             openreq.onsuccess = function() {
-                db = openreq.result;
+                dbInfo.db = openreq.result;
+                self._dbInfo = dbInfo;
                 resolve();
             };
         });
     }
 
     function getItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readonly')
-                              .objectStore(dbInfo.storeName);
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readonly')
+                    .objectStore(dbInfo.storeName);
                 var req = store.get(key);
 
                 req.onsuccess = function() {
@@ -74,11 +86,59 @@
         return promise;
     }
 
-    function setItem(key, value, callback) {
-        var _this = this;
+    // Iterate over all items stored in database.
+    function iterate(iterator, callback) {
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readwrite')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readonly')
+                                     .objectStore(dbInfo.storeName);
+
+                var req = store.openCursor();
+
+                req.onsuccess = function() {
+                    var cursor = req.result;
+
+                    if (cursor) {
+                        var result = iterator(cursor.value, cursor.key);
+
+                        if (result !== void(0)) {
+                            resolve(result);
+                        } else {
+                            cursor.continue();
+                        }
+                    } else {
+                        resolve();
+                    }
+                };
+
+                req.onerror = function() {
+                    reject(req.error);
+                };
+            }).catch(reject);
+        });
+
+        executeDeferedCallback(promise, callback);
+
+        return promise;
+    }
+
+    function setItem(key, value, callback) {
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
+        var promise = new Promise(function(resolve, reject) {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readwrite')
                               .objectStore(dbInfo.storeName);
 
                 // The reason we don't _save_ null is because IE 10 does
@@ -114,10 +174,19 @@
     }
 
     function removeItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readwrite')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readwrite')
                               .objectStore(dbInfo.storeName);
 
                 // We use a Grunt task to make this safe for IE and some
@@ -145,16 +214,18 @@
                 };
             }).catch(reject);
         });
-    
+
         executeDeferedCallback(promise, callback);
         return promise;
     }
 
     function clear(callback) {
-        var _this = this;
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readwrite')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readwrite')
                               .objectStore(dbInfo.storeName);
                 var req = store.clear();
 
@@ -173,10 +244,12 @@
     }
 
     function length(callback) {
-        var _this = this;
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readonly')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readonly')
                               .objectStore(dbInfo.storeName);
                 var req = store.count();
 
@@ -195,7 +268,8 @@
     }
 
     function key(n, callback) {
-        var _this = this;
+        var self = this;
+
         var promise = new Promise(function(resolve, reject) {
             if (n < 0) {
                 resolve(null);
@@ -203,8 +277,9 @@
                 return;
             }
 
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readonly')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readonly')
                               .objectStore(dbInfo.storeName);
 
                 var advanced = false;
@@ -246,11 +321,12 @@
     }
 
     function keys(callback) {
-        var _this = this;
+        var self = this;
 
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var store = db.transaction(dbInfo.storeName, 'readonly')
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                var store = dbInfo.db.transaction(dbInfo.storeName, 'readonly')
                               .objectStore(dbInfo.storeName);
 
                 var req = store.openCursor();
@@ -280,8 +356,10 @@
 
     function executeCallback(promise, callback) {
         if (callback) {
-            promise.then(callback, function(error) {
-                callback(null, error);
+            promise.then(function(result) {
+                callback(null, result);
+            }, function(error) {
+                callback(error);
             });
         }
     }
@@ -291,7 +369,7 @@
             promise.then(function(result) {
                 deferCallback(callback, result);
             }, function(error) {
-                    callback(null, error);
+                callback(error);
             });
         }
     }
@@ -301,10 +379,10 @@
     // call stack to be empty.
     // For more info : https://github.com/mozilla/localForage/issues/175
     // Pull request : https://github.com/mozilla/localForage/pull/178
-    function deferCallback(callback, value) {
+    function deferCallback(callback, result) {
         if (callback) {
             return setTimeout(function() {
-                return callback(value);
+                return callback(null, result);
             }, 0);
         }
     }
@@ -312,6 +390,7 @@
     var asyncStorage = {
         _driver: 'asyncStorage',
         _initStorage: _initStorage,
+        iterate: iterate,
         getItem: getItem,
         setItem: setItem,
         removeItem: removeItem,

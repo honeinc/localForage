@@ -17,11 +17,14 @@ To use localForage, just drop a single JavaScript file into your page:
 ```
 
 Download the [latest localForage from GitHub](https://github.com/mozilla/localForage/releases/latest), or install with
-[bower](http://bower.io):
+[npm](https://www.npmjs.org/) or [bower](http://bower.io):
 
 ```bash
+npm install localforage
 bower install localforage
 ```
+
+localForage is compatible with [browserify](http://browserify.org/).
 
 ## Supported Browsers/Platforms
 
@@ -89,7 +92,22 @@ var value = JSON.parse(localStorage.getItem('key'));
 alert(value);
 
 // Async, fast, and non-blocking!
-localforage.getItem('key', alert);
+localforage.getItem('key', function(err, value) { alert(value) });
+
+```
+
+Note that callbacks in localForage are Node-style (error argument first) since
+`0.9.3`. This means if you're using callbacks, your code should look like this:
+
+```javascript
+// Use err as your first argument.
+localforage.getItem('key', function(err, value) {
+    if (err) {
+        console.error('Oh noes!');
+    } else {
+        alert(value);
+    }
+});
 ```
 
 You can store any type in localForage; you aren't limited to strings like in
@@ -109,6 +127,18 @@ function doSomethingElse(value) {
 
 // With localForage, we allow promises:
 localforage.setItem('key', 'value').then(doSomethingElse);
+```
+
+Note that with Promises, `err` is not the first argument to your function.
+Instead, you handle an error with the rejection part of the Promise:
+
+```javascript
+// A full setItem() call with Promises.
+localforage.setItem('key', 'value').then(function(value) {
+    alert(value + ' was set!');
+}, function(error) {
+    console.error(error);
+});
 ```
 
 localForage relies on native [ES6 Promises](http://www.promisejs.org/), but
@@ -135,19 +165,19 @@ to change the driver localForage is using at any time.
 
 ```javascript
 // If you aren't using JS modules, things are loaded synchronously.
-localforage.setDriver('localStorageWrapper');
+localforage.setDriver(localforage.LOCALSTORAGE);
 alert(localforage.driver());
   => 'localStorageWrapper'
 
 // If you're using modules, things load asynchronously, so you should use
 // callbacks or promises to ensure things have loaded.
-localforage.setDriver('localStorageWrapper', function() {
+localforage.setDriver(localforage.LOCALSTORAGE, function() {
     alert(localforage.driver());
 });
   => 'localStorageWrapper'
 
 // The promises version:
-localforage.setDriver('localStorageWrapper').then(function() {
+localforage.setDriver(localforage.LOCALSTORAGE).then(function() {
     alert(localforage.driver());
 });
   => 'localStorageWrapper'
@@ -163,24 +193,25 @@ choice" will continue to be used.
 
 ## Configuration
 
-You can set database information, by giving the `window.localForageConfig`
-variable a hash of options. Available options are `name`, `storeName`,
-`version`, and `description`.
+You can set database information with the `config()` method.
+Available options are `driver`, `name`, `storeName`, `version`, and
+`description`.
 
 Example:
 ```javascript
 localforage.config({
+    driver      : localforage.WEBSQL, // Force WebSQL; same as using setDriver()
     name        : 'myApp',
     version     : 1.0,
     size        : 4980736, // Size of database, in bytes. WebSQL-only for now.
-    storeName   : 'keyvaluepairs',
+    storeName   : 'keyvaluepairs', // Should be alphanumeric, with underscores.
     description : 'some description'
 });
 ```
 
 **Note:** you must call `config()` _before_ you interact with your data. This
 means calling `config()` before using `getItem()`, `setItem()`, `removeItem()`,
-`clear()`, `key()`, or `length()`.
+`clear()`, `key()`, `keys()` or `length()`.
 
 ## RequireJS
 
@@ -221,6 +252,11 @@ have drivers for the following frameworks:
 If you have a driver you'd like listed, please
 [open an issue](https://github.com/mozilla/localForage/issues/new) to have it
 added to this list.
+
+## Custom Drivers
+
+You can create your own driver if you want; see the
+[`defineDriver`](https://mozilla.github.io/localForage/#definedriver) API docs.
 
 # Working on localForage
 

@@ -5,8 +5,6 @@
 (function() {
     'use strict';
 
-    var keyPrefix = '';
-    var dbInfo = {};
     // Promises!
     var Promise = (typeof module !== 'undefined' && module.exports) ?
                   require('promise') : this.Promise;
@@ -32,14 +30,17 @@
 
     // Config the localStorage backend, using options set in the config.
     function _initStorage(options) {
+        var self = this;
+        var dbInfo = {};
         if (options) {
             for (var i in options) {
                 dbInfo[i] = options[i];
             }
         }
 
-        keyPrefix = dbInfo.name + '/';
+        dbInfo.keyPrefix = dbInfo.name + '/';
 
+        self._dbInfo = dbInfo;
         return Promise.resolve();
     }
 
@@ -64,10 +65,18 @@
     // Remove all keys from the datastore, effectively destroying all data in
     // the app's key/value store!
     function clear(callback) {
-        var _this = this;
+        var self = this;
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                localStorage.clear();
+            self.ready().then(function() {
+                var keyPrefix = self._dbInfo.keyPrefix;
+
+                for (var i = localStorage.length - 1; i >= 0; i--) {
+                    var key = localStorage.key(i);
+
+                    if (key.indexOf(keyPrefix) === 0) {
+                        localStorage.removeItem(key);
+                    }
+                }
 
                 resolve();
             }).catch(reject);
@@ -81,11 +90,20 @@
     // library in Gaia, we don't modify return values at all. If a key's value
     // is `undefined`, we pass that value to the callback function.
     function getItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
+            self.ready().then(function() {
                 try {
-                    var result = localStorage.getItem(keyPrefix + key);
+                    var dbInfo = self._dbInfo;
+                    var result = localStorage.getItem(dbInfo.keyPrefix + key);
 
                     // If a result was found, parse it from the serialized
                     // string into a JS object. If result isn't truthy, the key
@@ -106,11 +124,54 @@
         return promise;
     }
 
+    // Iterate over all items in the store.
+    function iterate(iterator, callback) {
+        var self = this;
+
+        var promise = new Promise(function(resolve, reject) {
+            self.ready().then(function() {
+                try {
+                    var keyPrefix = self._dbInfo.keyPrefix;
+                    var keyPrefixLength = keyPrefix.length;
+                    var length = localStorage.length;
+
+                    for (var i = 0; i < length; i++) {
+                        var key = localStorage.key(i);
+                        var value = localStorage.getItem(key);
+
+                        // If a result was found, parse it from the serialized
+                        // string into a JS object. If result isn't truthy, the
+                        // key is likely undefined and we'll pass it straight
+                        // to the iterator.
+                        if (value) {
+                            value = _deserialize(value);
+                        }
+
+                        value = iterator(value, key.substring(keyPrefixLength));
+
+                        if (value !== void(0)) {
+                            resolve(value);
+                            return;
+                        }
+                    }
+
+                    resolve();
+                } catch (e) {
+                    reject(e);
+                }
+            }).catch(reject);
+        });
+
+        executeCallback(promise, callback);
+        return promise;
+    }
+
     // Same as localStorage's key() method, except takes a callback.
     function key(n, callback) {
-        var _this = this;
+        var self = this;
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
                 var result;
                 try {
                     result = localStorage.key(n);
@@ -120,7 +181,7 @@
 
                 // Remove the prefix from the key, if a key is found.
                 if (result) {
-                    result = result.substring(keyPrefix.length);
+                    result = result.substring(dbInfo.keyPrefix.length);
                 }
 
                 resolve(result);
@@ -132,14 +193,17 @@
     }
 
     function keys(callback) {
-        var _this = this;
+        var self = this;
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
                 var length = localStorage.length;
                 var keys = [];
 
                 for (var i = 0; i < length; i++) {
-                    keys.push(localStorage.key(i).substring(keyPrefix.length));
+                    if (localStorage.key(i).indexOf(dbInfo.keyPrefix) === 0) {
+                        keys.push(localStorage.key(i).substring(dbInfo.keyPrefix.length));
+                    }
                 }
 
                 resolve(keys);
@@ -152,12 +216,10 @@
 
     // Supply the number of keys in the datastore to the callback function.
     function length(callback) {
-        var _this = this;
+        var self = this;
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                var result = localStorage.length;
-
-                resolve(result);
+            self.keys().then(function(keys) {
+                resolve(keys.length);
             }).catch(reject);
         });
 
@@ -167,10 +229,19 @@
 
     // Remove an item from the store, nice and simple.
     function removeItem(key, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
-                localStorage.removeItem(keyPrefix + key);
+            self.ready().then(function() {
+                var dbInfo = self._dbInfo;
+                localStorage.removeItem(dbInfo.keyPrefix + key);
 
                 resolve();
             }).catch(reject);
@@ -275,7 +346,8 @@
         //
         // TODO: See why those tests fail and use a better solution.
         if (value && (value.toString() === '[object ArrayBuffer]' ||
-                      value.buffer && value.buffer.toString() === '[object ArrayBuffer]')) {
+                      value.buffer &&
+                      value.buffer.toString() === '[object ArrayBuffer]')) {
             // Convert binary arrays to a string and prefix the string with
             // a special marker.
             var buffer;
@@ -306,12 +378,12 @@
                 } else if (valueString === '[object Float64Array]') {
                     marker += TYPE_FLOAT64ARRAY;
                 } else {
-                    callback(new Error("Failed to get type for BinaryArray"));
+                    callback(new Error('Failed to get type for BinaryArray'));
                 }
             }
 
             callback(marker + _bufferToString(buffer));
-        } else if (valueString === "[object Blob]") {
+        } else if (valueString === '[object Blob]') {
             // Conver the blob to a binaryArray and then to a string.
             var fileReader = new FileReader();
 
@@ -326,11 +398,10 @@
             try {
                 callback(JSON.stringify(value));
             } catch (e) {
-                if (this.console && this.console.error) {
-                    this.console.error("Couldn't convert value into a JSON string: ", value);
-                }
+                window.console.error("Couldn't convert value into a JSON " +
+                                     'string: ', value);
 
-                callback(null, e);
+                callback(e);
             }
         }
     }
@@ -340,9 +411,17 @@
     // in case you want to operate on that value only after you're sure it
     // saved, or something like that.
     function setItem(key, value, callback) {
-        var _this = this;
+        var self = this;
+
+        // Cast the key to a string, as that's all we can set as a key.
+        if (typeof key !== 'string') {
+            window.console.warn(key +
+                                ' used as a key, but it is not a string.');
+            key = String(key);
+        }
+
         var promise = new Promise(function(resolve, reject) {
-            _this.ready().then(function() {
+            self.ready().then(function() {
                 // Convert undefined values to null.
                 // https://github.com/mozilla/localForage/pull/42
                 if (value === undefined) {
@@ -357,7 +436,8 @@
                         reject(error);
                     } else {
                         try {
-                            localStorage.setItem(keyPrefix + key, value);
+                            var dbInfo = self._dbInfo;
+                            localStorage.setItem(dbInfo.keyPrefix + key, value);
                         } catch (e) {
                             // localStorage capacity exceeded.
                             // TODO: Make this a specific error/event.
@@ -366,7 +446,7 @@
                                 reject(e);
                             }
                         }
-                        
+
                         resolve(originalValue);
                     }
                 });
@@ -379,8 +459,10 @@
 
     function executeCallback(promise, callback) {
         if (callback) {
-            promise.then(callback, function(error) {
-                callback(null, error);
+            promise.then(function(result) {
+                callback(null, result);
+            }, function(error) {
+                callback(error);
             });
         }
     }
@@ -389,6 +471,7 @@
         _driver: 'localStorageWrapper',
         _initStorage: _initStorage,
         // Default API, from Gaia/localStorage.
+        iterate: iterate,
         getItem: getItem,
         setItem: setItem,
         removeItem: removeItem,
